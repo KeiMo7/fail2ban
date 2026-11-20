@@ -44,6 +44,35 @@ class Transmitter:
 	def __init__(self, server):
 		self.__server = server
 		self.__quiet = 0
+
+	@staticmethod
+	def _parseIPOptions(args, whitelist=None):
+		opts = {
+			'ips': [],
+			'ifexists': True,
+			'whitelist': whitelist,
+			'source': None,
+			'actor': 'cli',
+			'reason': None,
+		}
+		args = list(args)
+		while args:
+			arg = args.pop(0)
+			if arg == '--report-absent':
+				opts['ifexists'] = False
+			elif arg == '--whitelist':
+				opts['whitelist'] = args.pop(0)
+			elif arg == '--source':
+				opts['source'] = args.pop(0)
+			elif arg == '--by':
+				opts['actor'] = args.pop(0)
+			elif arg == '--reason':
+				opts['reason'] = args.pop(0)
+			else:
+				opts['ips'].append(arg)
+		if opts['source'] is None:
+			opts['source'] = opts['whitelist'] or 'cli'
+		return opts
 		
 	##
 	# Proceeds a command.
@@ -111,13 +140,21 @@ class Transmitter:
 				self.__quiet = 0
 				self.__server.reloadJails(*opts, begin=False)
 			return 'OK'
-		elif name == "unban" and len(command) >= 2:
+		elif name in ("unban", "whitelistip") and len(command) >= 2:
 			# unban in all jails:
-			value = command[1:]
+			opts = self._parseIPOptions(command[1:],
+				whitelist='ops' if name == "whitelistip" else None)
+			value = opts['ips']
 			# if all ips:
 			if len(value) == 1 and value[0] == "--all":
 				return self.__server.setUnbanIP()
-			return self.__server.setUnbanIP(None, value)
+			if opts['whitelist']:
+				return self.__server.setWhitelistIP(None, value,
+					source=opts['whitelist'], reason=opts['reason'],
+					actor=opts['actor'])
+			return self.__server.setUnbanIP(None, value,
+				ifexists=opts['ifexists'], actor=opts['actor'],
+				reason=opts['reason'], source=opts['source'])
 		elif name == "banned":
 			# check IP is banned in all jails:
 			return self.__server.banned(None, command[1:])
@@ -146,6 +183,16 @@ class Transmitter:
 			return self.status(command[1:])
 		elif name in ("stats", "statistic", "statistics"):
 			return self.__server.status("--all", "stats")
+		elif name in ("banstats", "banstatistics"):
+			return self.__server.status("--all", "banstats")
+		elif name == "audit":
+			args = list(command[1:])
+			opts = {'since': None, 'ip': None, 'action': None, 'limit': 1000}
+			while args:
+				arg = args.pop(0)
+				if arg in ('--since', '--ip', '--action', '--limit') and args:
+					opts[arg[2:]] = args.pop(0)
+			return self.__server.getAudit(**opts)
 		elif name == "version":
 			return version.version
 		elif name == "config-error":
@@ -361,16 +408,58 @@ class Transmitter:
 			if self.__quiet: return
 			return self.__server.getBanTimeExtra(name, opt)
 		elif command[1] == "banip":
-			value = command[2:]
-			return self.__server.setBanIP(name,value)
+			opts = self._parseIPOptions(command[2:])
+			return self.__server.setBanIP(name, opts['ips'],
+				actor=opts['actor'], reason=opts['reason'],
+				source=opts['source'])
 		elif command[1] == "unbanip":
-			ifexists = True
-			if command[2] != "--report-absent":
-				value = command[2:]
-			else:
-				ifexists = False
-				value = command[3:]
-			return self.__server.setUnbanIP(name, value, ifexists=ifexists)
+			opts = self._parseIPOptions(command[2:])
+			if opts['whitelist']:
+				return self.__server.setWhitelistIP(name, opts['ips'],
+					source=opts['whitelist'], reason=opts['reason'],
+					actor=opts['actor'])
+			return self.__server.setUnbanIP(name, opts['ips'],
+				ifexists=opts['ifexists'], actor=opts['actor'],
+				reason=opts['reason'], source=opts['source'])
+		elif command[1] == "whitelistip":
+			opts = self._parseIPOptions(command[2:], whitelist='ops')
+			return self.__server.setWhitelistIP(name, opts['ips'],
+				source=opts['whitelist'], reason=opts['reason'],
+				actor=opts['actor'])
+		elif command[1] == "delwhitelistip":
+			opts = self._parseIPOptions(command[2:])
+			return self.__server.delWhitelistIP(name, opts['ips'][0],
+				source=opts['whitelist'], actor=opts['actor'],
+				reason=opts['reason'])
+		elif command[1] == "banbatch":
+			value = command[2]
+			size = command[3] if len(command) > 3 else None
+			timeout = command[4] if len(command) > 4 else None
+			fallback = command[5] if len(command) > 5 else None
+			return self.__server.setBanBatch(name, value, size=size,
+				timeout=timeout, fallback=fallback)
+		elif command[1] == "banbatchsize":
+			cfg = self.__server.getBanBatch(name)
+			return self.__server.setBanBatch(name, cfg['enabled'],
+				size=command[2], timeout=cfg['timeout'],
+				fallback=cfg['fallback'])
+		elif command[1] == "banbatchtimeout":
+			cfg = self.__server.getBanBatch(name)
+			return self.__server.setBanBatch(name, cfg['enabled'],
+				size=cfg['size'], timeout=command[2],
+				fallback=cfg['fallback'])
+		elif command[1] == "banbatchfallback":
+			cfg = self.__server.getBanBatch(name)
+			return self.__server.setBanBatch(name, cfg['enabled'],
+				size=cfg['size'], timeout=cfg['timeout'],
+				fallback=command[2])
+		elif command[1] == "banchainmax":
+			value = command[2]
+			overflow = command[3] if len(command) > 3 else None
+			return self.__server.setBanChainMax(name, value, overflow)
+		elif command[1] == "banchainoverflow":
+			return self.__server.setBanChainMax(name,
+				self.__server.getBanChainMax(name), command[2])
 		elif command[1] == "addaction":
 			args = [command[2]]
 			if len(command) > 3:
@@ -454,6 +543,10 @@ class Transmitter:
 			return self.__server.getIgnoreSelf(name)
 		elif command[1] == "ignoreip":
 			return self.__server.getIgnoreIP(name)
+		elif command[1] == "whitelist":
+			return self.__server.getWhitelist(name)
+		elif command[1] == "whiteliststats":
+			return self.__server.getWhitelistStats(name)
 		elif command[1] == "ignorecommand":
 			return self.__server.getIgnoreCommand(name)
 		elif command[1] == "ignorecache":
@@ -482,6 +575,10 @@ class Transmitter:
 		# Action
 		elif command[1] == "bantime":
 			return self.__server.getBanTime(name)
+		elif command[1] == "banbatch":
+			return self.__server.getBanBatch(name)
+		elif command[1] == "banchainmax":
+			return self.__server.getBanChainMax(name)
 		elif command[1] == "banip":
 			return self.__server.getBanList(name,
 				withTime=len(command) > 2 and command[2] == "--with-time")

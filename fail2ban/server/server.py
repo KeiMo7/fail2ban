@@ -343,6 +343,7 @@ class Server:
 					else:
 						# commit (reload was finished):
 						jail.filter.reload(begin=False)
+						jail.restoreWhitelist()
 						jail.actions.reload(begin=False)
 				for jn in deljails:
 					self.delJail(jn)
@@ -363,14 +364,14 @@ class Server:
 	def getIgnoreSelf(self, name):
 		return self.__jails[name].filter.ignoreSelf
 
-	def addIgnoreIP(self, name, ip):
-		self.__jails[name].filter.addIgnoreIP(ip)
+	def addIgnoreIP(self, name, ip, source='config', reason=None):
+		self.__jails[name].filter.addIgnoreIP(ip, source=source, reason=reason)
 	
 	def delIgnoreIP(self, name, ip):
 		self.__jails[name].filter.delIgnoreIP(ip)
 	
-	def getIgnoreIP(self, name):
-		return self.__jails[name].filter.getIgnoreIP()
+	def getIgnoreIP(self, name, with_source=False):
+		return self.__jails[name].filter.getIgnoreIP(with_source=with_source)
 	
 	def addLogPath(self, name, fileName, tail=False):
 		filter_ = self.__jails[name].filter
@@ -522,14 +523,29 @@ class Server:
 	
 	def setBanTime(self, name, value):
 		self.__jails[name].actions.setBanTime(value)
+
+	def setBanBatch(self, name, enabled, size=None, timeout=None, fallback=None):
+		return self.__jails[name].actions.setBanBatch(
+			enabled, size=size, timeout=timeout, fallback=fallback)
+
+	def getBanBatch(self, name):
+		return self.__jails[name].actions.getBanBatch()
+
+	def setBanChainMax(self, name, value, overflow=None):
+		return self.__jails[name].actions.setBanChainMax(value, overflow)
+
+	def getBanChainMax(self, name):
+		return self.__jails[name].actions.getBanChainMax()
 	
 	def addAttemptIP(self, name, *args):
 		return self.__jails[name].filter.addAttempt(*args)
 
-	def setBanIP(self, name, value):
-		return self.__jails[name].actions.addBannedIP(value)
+	def setBanIP(self, name, value, actor='cli', reason=None, source=None):
+		return self.__jails[name].actions.addBannedIP(
+			value, actor=actor, reason=reason, source=source)
 
-	def setUnbanIP(self, name=None, value=None, ifexists=True):
+	def setUnbanIP(self, name=None, value=None, ifexists=True,
+			actor='cli', reason=None, source=None):
 		if name is not None:
 			# single jail:
 			jails = [self.__jails[name]]
@@ -540,8 +556,76 @@ class Server:
 		cnt = 0
 		ifexists |= (name is None)
 		for jail in jails:
-			cnt += jail.actions.removeBannedIP(value, ifexists=ifexists)
+			cnt += jail.actions.removeBannedIP(value, ifexists=ifexists,
+				actor=actor, reason=reason, source=source)
 		return cnt
+
+	def setWhitelistIP(self, name=None, value=None, source='ops',
+			reason=None, actor='cli'):
+		"""Unban an address everywhere and add it to the source whitelist.
+
+		The whitelist entry is persisted first, so a concurrent log match
+		cannot put the address back into the firewall while the command is
+		still running.
+		"""
+		if name is not None:
+			jails = [self.__jails[name]]
+		else:
+			jails = list(self.__jails.values())
+		ips = value if isinstance(value, (list, tuple)) else [value]
+		ips = [str(ip) for ip in ips if ip is not None]
+		if self.__db is not None:
+			for ip in ips:
+				self.__db.addWhitelist(ip, source=source, reason=reason,
+					actor=actor)
+		removed = 0
+		for jail in jails:
+			for ip in ips:
+				jail.filter.addIgnoreIP(ip, source=source, reason=reason)
+				removed += jail.actions.removeBannedIP(ip, ifexists=True,
+					actor=actor, reason=reason or 'false positive',
+					source=source)
+				jail.actions.audit('whitelist', ip=ip, actor=actor,
+					source=source, reason=reason or 'false positive')
+		return removed
+
+	def delWhitelistIP(self, name=None, value=None, source=None, actor='cli',
+			reason=None):
+		if self.__db is not None:
+			self.__db.delWhitelist(value, source=source)
+		if name is not None:
+			jails = [self.__jails[name]]
+		else:
+			jails = list(self.__jails.values())
+		for jail in jails:
+			# Remove source provenance; only drop the actual ignore entry
+			# when no other source still whitelists it.
+			if value is not None:
+				jail.filter.delIgnoreIPSource(value, source)
+			jail.actions.audit('del-whitelist', ip=value, actor=actor,
+				source=source, reason=reason)
+		return True
+
+	def getWhitelist(self, name=None, with_source=True):
+		if name is not None:
+			return self.__jails[name].filter.getIgnoreIP(with_source=with_source)
+		result = {}
+		for name, jail in self.__jails.items():
+			result[name] = jail.filter.getIgnoreIP(with_source=with_source)
+		return result
+
+	def getWhitelistStats(self, name=None):
+		if name is not None:
+			return self.__jails[name].filter.getIgnoreIPStats()
+		result = {}
+		for name, jail in self.__jails.items():
+			result[name] = jail.filter.getIgnoreIPStats()
+		return result
+
+	def getAudit(self, **kwargs):
+		if self.__db is None:
+			return []
+		return self.__db.getAudit(**kwargs)
 		
 	def banned(self, name=None, ids=None):
 		if name is not None:

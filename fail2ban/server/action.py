@@ -24,6 +24,7 @@ __license__ = "GPL"
 import logging
 import os
 import re
+import shlex
 import signal
 import subprocess
 import tempfile
@@ -34,6 +35,7 @@ try:
 	from collections.abc import MutableMapping
 except ImportError:
 	from collections import MutableMapping
+from collections import OrderedDict
 
 from .failregex import mapTag2Opt
 from .ipdns import DNSUtils
@@ -253,6 +255,21 @@ class ActionBase(object, metaclass=ABCMeta):
 		"""
 		pass
 
+	def _banMany(self, aInfos):
+		"""Executed for a batch of bans.
+
+		The default keeps the historic per-ticket behaviour.  Actions
+		implementing an atomic bulk operation should override this method
+		and expose ``_has_batch_ban`` as true.  A bulk operation must either
+		apply all entries or leave the previous state untouched.
+		"""
+		for aInfo in aInfos:
+			self.ban(aInfo)
+
+	@property
+	def _has_batch_ban(self):
+		return False
+
 	def reban(self, aInfo): # pragma: no cover - abstract
 		"""Executed when a ban occurs.
 
@@ -325,6 +342,8 @@ class CommandAction(ActionBase):
 			self.actionstart = ''
 			## Command executed when ticket gets banned.
 			self.actionban = ''
+			## Command executed for a batch of tickets (optional).
+			self.actionbatchban = ''
 			self.actionreban = ''
 			## Command executed when ticket gets removed.
 			self.actionunban = ''
@@ -567,6 +586,42 @@ class CommandAction(ActionBase):
 		if not self._processCmd(cmd, aInfo):
 			raise RuntimeError("Error banning %(ip)s" % aInfo)
 		self.__started[family] = self.__started.get(family, 0) | 3; # started and contains items
+
+	@property
+	def _has_batch_ban(self):
+		return bool(getattr(self, 'actionbatchban', ''))
+
+	def _banMany(self, aInfos):
+		"""Executes one bulk command per address family."""
+		if not self._has_batch_ban:
+			return ActionBase._banMany(self, aInfos)
+		groups = OrderedDict()
+		for aInfo in aInfos:
+			groups.setdefault(aInfo.get('family', ''), []).append(aInfo)
+		for family, infos in groups.items():
+			if self._startOnDemand:
+				if not self.__started.get(family):
+					self._start(family, forceStart=True)
+			batchInfo = infos[0].copy()
+			batchInfo['family'] = family
+			batchInfo['ip-count'] = len(infos)
+			batchInfo['ip-list'] = ' '.join(
+				shlex.quote(str(aInfo['ip'])) for aInfo in infos)
+			fd, ipfile = tempfile.mkstemp(prefix='f2b-banbatch-', text=True)
+			try:
+				with os.fdopen(fd, 'w') as f:
+					for aInfo in infos:
+						f.write(str(aInfo['ip']) + '\n')
+				batchInfo['ip-list-file'] = ipfile
+				if not self._processCmd('<actionbatchban>', batchInfo):
+					raise RuntimeError(
+						"Error banning %d IP(s) in batch" % len(infos))
+				self.__started[family] = self.__started.get(family, 0) | 3
+			finally:
+				try:
+					os.unlink(ipfile)
+				except OSError:
+					pass
 
 	@property
 	def _prolongable(self):
@@ -924,12 +979,14 @@ class CommandAction(ActionBase):
 		self.invalidateBanEpoch()
 		# try to find repair command, if exists - exec it:
 		repairCmd = self._getOperation('<actionrepair>', family)
+		repaired = False
 		if repairCmd:
 			if not self.executeCmd(repairCmd, self.timeout):
 				self.__started[family] = 0
 				self._logSys.critical("Unable to restore environment")
 				return 0
 			self.__started[family] = 1
+			repaired = True
 		else:
 			# no repair command, try to restart action...
 			# [WARNING] TODO: be sure all banactions get a repair command, because
@@ -944,6 +1001,13 @@ class CommandAction(ActionBase):
 		if self.__started.get(family) and not self.executeCmd(checkCmd, self.timeout):
 			self._logSys.critical("Unable to restore environment")
 			return 0
+		# A repaired batch action is empty again; replay all known bans
+		# through the atomic bulk path so the chain is complete.
+		if repaired and self._has_batch_ban and self._jail is not None:
+			try:
+				self._jail.actions.rebuildAction(self, self._name)
+			except Exception as e: # pragma: no cover
+				self._logSys.error("Unable to rebuild repaired action: %s", e)
 		return 1
 
 	def _processCmd(self, cmd, aInfo=None):

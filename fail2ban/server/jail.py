@@ -288,6 +288,7 @@ class Jail(object):
 		"""
 		try:
 			if self.database is not None:
+				self.restoreWhitelist()
 				if self._banExtra.get('increment'):
 					forbantime = None;
 					if correctBanTime:
@@ -317,6 +318,18 @@ class Jail(object):
 							exc_info=logSys.getEffectiveLevel()<=logging.DEBUG)
 		except Exception as e: # pragma: no cover
 			logSys.error('Restore bans failed: %s', e,
+				exc_info=logSys.getEffectiveLevel()<=logging.DEBUG)
+
+	def restoreWhitelist(self):
+		"""Reapply persisted whitelist entries to the in-memory filter."""
+		if self.database is None:
+			return
+		try:
+			for entry in self.database.getWhitelist():
+				self.filter.addIgnoreIP(entry['ip'], source=entry.get('source'),
+					reason=entry.get('reason'))
+		except Exception as e:
+			logSys.error('Restore whitelist failed: %s', e,
 				exc_info=logSys.getEffectiveLevel()<=logging.DEBUG)
 
 	def start(self):

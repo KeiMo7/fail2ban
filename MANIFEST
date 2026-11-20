@@ -27,6 +27,7 @@ config/action.d/ipfilter.conf
 config/action.d/ipfw.conf
 config/action.d/iptables-allports.conf
 config/action.d/iptables.conf
+config/action.d/iptables-batch.conf
 config/action.d/iptables-ipset.conf
 config/action.d/iptables-ipset-proto4.conf
 config/action.d/iptables-ipset-proto6-allports.conf
@@ -239,6 +240,9 @@ fail2ban/tests/action_d/test_smtp.py
 fail2ban/tests/actionstestcase.py
 fail2ban/tests/actiontestcase.py
 fail2ban/tests/banmanagertestcase.py
+fail2ban/tests/banbatchtestcase.py
+fail2ban/tests/batchbenchmark.py
+fail2ban/tests/iptables_batchbenchmark.py
 fail2ban/tests/clientbeautifiertestcase.py
 fail2ban/tests/clientreadertestcase.py
 fail2ban/tests/config/action.d/action.conf

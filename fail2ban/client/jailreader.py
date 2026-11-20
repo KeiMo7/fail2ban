@@ -118,6 +118,12 @@ class JailReader(ConfigReader):
 		"logpath": ["string", None],
 		"skip_if_nologs": ["bool", False],
 		"systemd_if_nologs": ["bool", True],
+		"banbatch": ["bool", None],
+		"banbatchsize": ["int", None],
+		"banbatchtimeout": ["string", None],
+		"banbatchfallback": ["bool", None],
+		"banchainmax": ["int", None],
+		"banchainoverflow": ["string", None],
 		"action": ["string", ""]
 	}
 	_configOpts.update(FilterReader._configOpts)

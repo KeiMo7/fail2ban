@@ -159,6 +159,29 @@ class Fail2BanDb(object):
 			");" \
 			"CREATE INDEX IF NOT EXISTS bips_timeofban ON bips(timeofban);" \
 			"CREATE INDEX IF NOT EXISTS bips_ip ON bips(ip);")
+		,('whitelist', "CREATE TABLE IF NOT EXISTS whitelist(" \
+			"ip TEXT NOT NULL, " \
+			"source TEXT NOT NULL DEFAULT 'unknown', " \
+			"reason TEXT, " \
+			"actor TEXT, " \
+			"time INTEGER NOT NULL, " \
+			"PRIMARY KEY(ip, source)" \
+			");" \
+			"CREATE INDEX IF NOT EXISTS whitelist_source ON whitelist(source);")
+		,('audit', "CREATE TABLE IF NOT EXISTS audit(" \
+			"id INTEGER PRIMARY KEY AUTOINCREMENT, " \
+			"time INTEGER NOT NULL, " \
+			"actor TEXT, " \
+			"action TEXT NOT NULL, " \
+			"ip TEXT, " \
+			"jail TEXT, " \
+			"source TEXT, " \
+			"reason TEXT, " \
+			"details JSON" \
+			");" \
+			"CREATE INDEX IF NOT EXISTS audit_time ON audit(time);" \
+			"CREATE INDEX IF NOT EXISTS audit_ip ON audit(ip);" \
+			"CREATE INDEX IF NOT EXISTS audit_action ON audit(action);")
 	)
 	_CREATE_TABS = dict(_CREATE_SCRIPTS)
 
@@ -245,6 +268,12 @@ class Fail2BanDb(object):
 				cur.execute("PRAGMA integrity_check")
 				for s in cur.fetchall():
 					logSys.debug("  -> %s", ' '.join(s))
+				self._db.commit()
+			elif cur:
+				# Add operational tables to databases created by older
+				# fail2ban versions without changing the schema version.
+				cur.executescript(Fail2BanDb._CREATE_TABS['whitelist'])
+				cur.executescript(Fail2BanDb._CREATE_TABS['audit'])
 				self._db.commit()
 			if cur:
 				# pypy: set journal mode after possible upgrade db:
@@ -629,6 +658,82 @@ class Fail2BanDb(object):
 			cur.execute(query2, queryArgs);
 
 	@commitandrollback
+	def addWhitelist(self, cur, ip, source='unknown', reason=None,
+			actor=None, time=None):
+		"""Persist a whitelist entry together with its provenance."""
+		cur.execute(
+			"INSERT OR REPLACE INTO whitelist(ip, source, reason, actor, time)"
+			" VALUES(?, ?, ?, ?, ?)",
+			(str(ip), str(source or 'unknown'), reason, actor,
+				int(time if time is not None else MyTime.time())))
+
+	@commitandrollback
+	def delWhitelist(self, cur, ip=None, source=None):
+		"""Delete one or all persisted whitelist entries."""
+		query = "DELETE FROM whitelist WHERE 1"
+		args = []
+		if ip is not None:
+			query += " AND ip=?"
+			args.append(str(ip))
+		if source is not None:
+			query += " AND source=?"
+			args.append(str(source))
+		cur.execute(query, args)
+
+	@commitandrollback
+	def getWhitelist(self, cur, ip=None, source=None):
+		query = "SELECT ip, source, reason, actor, time FROM whitelist WHERE 1"
+		args = []
+		if ip is not None:
+			query += " AND ip=?"
+			args.append(str(ip))
+		if source is not None:
+			query += " AND source=?"
+			args.append(str(source))
+		query += " ORDER BY time, ip, source"
+		return [
+			{'ip': row[0], 'source': row[1], 'reason': row[2],
+			 'actor': row[3], 'time': row[4]}
+			for row in cur.execute(query, args)
+		]
+
+	@commitandrollback
+	def addAudit(self, cur, action, ip=None, jail=None, actor=None,
+			source=None, reason=None, details=None, time=None):
+		"""Persist an operational audit event.
+
+		Audit records deliberately contain no secrets: ``details`` is a
+		small JSON object supplied by the caller (for example a rule name).
+		"""
+		cur.execute(
+			"INSERT INTO audit(time, actor, action, ip, jail, source, reason, details)"
+			" VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+			(int(time if time is not None else MyTime.time()),
+			 actor, action, str(ip) if ip is not None else None,
+			 jail.name if hasattr(jail, 'name') else jail,
+			 source, reason, details or {}))
+
+	@commitandrollback
+	def getAudit(self, cur, since=None, ip=None, action=None, limit=1000):
+		query = "SELECT time, actor, action, ip, jail, source, reason, details" \
+			" FROM audit WHERE 1"
+		args = []
+		if since is not None:
+			query += " AND time>=?"
+			args.append(int(since))
+		if ip is not None:
+			query += " AND ip=?"
+			args.append(str(ip))
+		if action is not None:
+			query += " AND action=?"
+			args.append(str(action))
+		query += " ORDER BY time DESC, id DESC LIMIT ?"
+		args.append(int(limit))
+		keys = ('time', 'actor', 'action', 'ip', 'jail', 'source',
+			'reason', 'details')
+		return [dict(zip(keys, row)) for row in cur.execute(query, args)]
+
+	@commitandrollback
 	def _getBans(self, cur, jail=None, bantime=None, ip=None):
 		query = "SELECT ip, timeofban, data FROM bans WHERE 1"
 		queryArgs = []
@@ -886,5 +991,6 @@ class Fail2BanDb(object):
 			"DELETE FROM bans WHERE timeofban < ?",
 			(MyTime.time() - self._purgeAge, ))
 		self._purge_bips(cur)
+		cur.execute("DELETE FROM audit WHERE time < ?",
+			(MyTime.time() - self._purgeAge, ))
 		self._cleanjails(cur)
-

@@ -83,6 +83,8 @@ class Filter(JailThread):
 		## The ignore IP list.
 		self.__ignoreIpSet = set()
 		self.__ignoreIpList = []
+		## Provenance for whitelist entries: source -> who added it and why.
+		self.__ignoreIpSource = dict()
 		## External command
 		self.__ignoreCommand = False
 		## Cache for ignoreip:
@@ -153,6 +155,7 @@ class Filter(JailThread):
 		self.__ignoreSelf = True
 		self.__ignoreCommand = False
 		self.__ignoreCache = None
+		self.__ignoreIpSource = dict()
 
 	def reload(self, begin=True):
 		""" Begin or end of reloading resp. refreshing of all parameters
@@ -484,6 +487,8 @@ class Filter(JailThread):
 		# Generate the failure attempt for the IP:
 		unixTime = MyTime.time()
 		ticket = FailTicket(ip, unixTime, matches=matches)
+		ticket.setData(matched_at=unixTime, actor='fail2ban-filter',
+			ban_reason='manual attempt')
 		# check it shall be ignored:
 		if self._inIgnoreIPList(ip, ticket):
 			return 0
@@ -518,21 +523,32 @@ class Filter(JailThread):
 	# when finding failures. CIDR mask and DNS are also accepted.
 	# @param ip IP address to ignore
 
-	def addIgnoreIP(self, ipstr):
+	def addIgnoreIP(self, ipstr, source="config", reason=None):
 		# An empty string is always false
 		if ipstr == "":
 			return
+		def _remember(key):
+			sources = self.__ignoreIpSource.setdefault(str(key), dict())
+			sources[source or 'unknown'] = {
+				'source': source or 'unknown',
+				'reason': reason,
+				'time': MyTime.time(),
+			}
 		# File?
 		ip = FileIPAddrSet.RE_FILE_IGN_IP.match(ipstr)
 		if ip:
 			ip = DNSUtils.getIPsFromFile(ip.group(1)) # FileIPAddrSet
 			self.__ignoreIpList.append(ip)
+			_remember(ipstr)
+			self._invalidateIgnoreCache()
 			return
 		# Create IP address object
 		ip = IPAddr(ipstr)
 		# Avoid exact duplicates
 		if ip in self.__ignoreIpSet or ip in self.__ignoreIpList:
+			_remember(ip)
 			logSys.log(logging.MSG, "  Ignore duplicate %r (%r), already in ignore list", ip, ipstr)
+			self._invalidateIgnoreCache()
 			return
 		# log and append to ignore list
 		logSys.debug("  Add %r to ignore list (%r)", ip, ipstr)
@@ -541,31 +557,91 @@ class Filter(JailThread):
 			self.__ignoreIpSet.add(ip)
 		else:
 			self.__ignoreIpList.append(ip)
+		_remember(ip)
+		self._invalidateIgnoreCache()
 
 	def delIgnoreIP(self, ip=None):
 		# clear all:
 		if ip is None:
 			self.__ignoreIpSet.clear()
 			del self.__ignoreIpList[:]
+			self.__ignoreIpSource.clear()
+			self._invalidateIgnoreCache()
 			return
 		# delete by ip:
 		logSys.debug("  Remove %r from ignore list", ip)
 		# File?
 		if FileIPAddrSet.RE_FILE_IGN_IP.match(ip):
-			self.__ignoreIpList.remove(ip)
+			try:
+				self.__ignoreIpList.remove(ip)
+			except ValueError:
+				pass
+			self.__ignoreIpSource.pop(str(ip), None)
+			self._invalidateIgnoreCache()
 			return
 		# IP / DNS
 		if ip in self.__ignoreIpSet:
 			self.__ignoreIpSet.remove(ip)
 		else:
 			self.__ignoreIpList.remove(ip)
+		self.__ignoreIpSource.pop(str(IPAddr(ip)), None)
+		self._invalidateIgnoreCache()
+
+	def _invalidateIgnoreCache(self):
+		if self.__ignoreCache:
+			self.__ignoreCache[1].clear()
 
 	def logIgnoreIp(self, ip, log_ignore, ignore_source="unknown source"):
 		if log_ignore:
 			logSys.info("[%s] Ignore %s by %s", self.jailName, ip, ignore_source)
 
-	def getIgnoreIP(self):
-		return self.__ignoreIpList + list(self.__ignoreIpSet)
+	def getIgnoreIP(self, with_source=False):
+		items = self.__ignoreIpList + list(self.__ignoreIpSet)
+		if not with_source:
+			return items
+		return [
+			(ip, ', '.join(sorted(self.__ignoreIpSource.get(str(ip), {}))) or 'unknown')
+			for ip in items
+		]
+
+	def getIgnoreIPStats(self):
+		counts = dict()
+		for sources in self.__ignoreIpSource.values():
+			for source in sources:
+				counts[source] = counts.get(source, 0) + 1
+		return counts
+
+	def inExplicitWhitelist(self, ip):
+		"""Check runtime/operational whitelist entries.
+
+		Unlike ``inIgnoreIPList`` this intentionally ignores ignoreself and
+		ignorecommand.  Explicit ``ignoreip`` entries are covered regardless
+		of whether they came from configuration or a runtime command.
+		"""
+		if not isinstance(ip, IPAddr):
+			ip = IPAddr(ip)
+		def _explicit(key):
+			return bool(self.__ignoreIpSource.get(str(key)))
+		if ip in self.__ignoreIpSet and _explicit(ip):
+			return True
+		for net in self.__ignoreIpList:
+			if ip.isInNet(net) and _explicit(net):
+				return True
+		return False
+
+	def delIgnoreIPSource(self, ip, source):
+		"""Remove one provenance and drop the IP if no source remains."""
+		key = str(IPAddr(ip))
+		sources = self.__ignoreIpSource.get(key, {})
+		sources.pop(source, None)
+		if not sources:
+			self.__ignoreIpSource.pop(key, None)
+			try:
+				self.delIgnoreIP(ip)
+			except ValueError:
+				pass
+		else:
+			self._invalidateIgnoreCache()
 
 	##
 	# Check if IP address/DNS is in the ignore list.
@@ -735,6 +811,8 @@ class Filter(JailThread):
 				if self.checkFindTime and unixTime > MyTime.time():
 					unixTime = MyTime.time()
 				tick = FailTicket(ip, unixTime, data=fail)
+				tick.setData(matched_at=MyTime.time(), actor='fail2ban-filter',
+					ban_reason='log match')
 				if self._inIgnoreIPList(ip, tick):
 					continue
 				logSys.info(
@@ -1580,4 +1658,3 @@ class JournalFilter(Filter): # pragma: systemd no cover
 
 	def getJournalMatch(self, match): # pragma: no cover - Base class, not used
 		return []
-

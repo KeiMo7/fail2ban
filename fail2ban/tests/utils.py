@@ -375,6 +375,7 @@ def gatherTests(regexps=None, opts=None):
 	from . import datedetectortestcase
 	from . import actiontestcase
 	from . import actionstestcase
+	from . import banbatchtestcase
 	from . import sockettestcase
 	from . import misctestcase
 	from . import databasetestcase
@@ -418,6 +419,8 @@ def gatherTests(regexps=None, opts=None):
 	tests.addTest(loadTests(servertestcase.ServerConfigReaderTests))
 	tests.addTest(loadTests(actiontestcase.CommandActionTest))
 	tests.addTest(loadTests(actionstestcase.ExecuteActions))
+	tests.addTest(loadTests(banbatchtestcase.BatchActionsTest))
+	tests.addTest(loadTests(banbatchtestcase.WhitelistAuditTest))
 	# Ticket, BanTicket, FailTicket
 	tests.addTest(loadTests(tickettestcase.TicketTests))
 	# FailManager

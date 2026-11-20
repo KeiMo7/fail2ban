@@ -190,6 +190,7 @@ class ObserverThread(JailThread):
 			# system and service events:
 			'db_set': self.db_set,
 			'db_purge': self.db_purge,
+			'audit': self.audit,
 			# service events of observer self:
 			'is_alive' : self.isAlive,
 			'is_active': self.isActive,
@@ -359,6 +360,11 @@ class ObserverThread(JailThread):
 			self.__db.purge()
 		# trigger timer again ...
 		self.add_named_timer('DB_PURGE', self.__db_purge_interval, 'db_purge')
+
+	def audit(self, data):
+		"""Persist an audit event asynchronously from the observer thread."""
+		if self.__db is not None:
+			self.__db.addAudit(**data)
 
 	## -----------------------------------------
 	## [Async] ban time increment functionality ...
